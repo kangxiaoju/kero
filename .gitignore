@@ -2,3 +2,6 @@
 /.rustup
 /.cargohome
 /.nixcargo
+
+# nix build symlink
+/result
