@@ -21,8 +21,8 @@ pub fn render_config(cfg: &Config) -> String {
     if !n.dhcp && !n.ip.is_empty() {
         s.push_str(&format!("ipv4 = \"{}\"\n", n.ip));
     }
-    s.push_str(&format!("rpc_portal = \"{}\"\n", n.rpc_portal));
-    s.push_str(&format!("dev_name = \"{}\"\n", n.dev_name));
+    // Note: `dev_name` lives under [flags]; `rpc_portal` is a CLI-only flag
+    // (not a TOML field), both applied in `start()` / below.
     let listeners = n
         .listeners
         .iter()
@@ -43,6 +43,7 @@ pub fn render_config(cfg: &Config) -> String {
     }
     s.push('\n');
     s.push_str("[flags]\n");
+    s.push_str(&format!("dev_name = \"{}\"\n", n.dev_name));
     s.push_str("enable_kcp_proxy = true\n");
     s
 }
@@ -60,7 +61,14 @@ pub fn start(cfg: &Config) -> Result<i32> {
     write_config(cfg)?;
     let bin = paths::binary("easytier-core")?;
     let config = paths::easytier_config()?;
-    let args = vec!["-c".to_string(), config.to_string_lossy().to_string()];
+    // `rpc_portal` is not a TOML field in EasyTier; pass it as a CLI flag so
+    // `kero net`/`easytier-cli` can reach the managed instance on a fixed port.
+    let args = vec![
+        "-c".to_string(),
+        config.to_string_lossy().to_string(),
+        "--rpc-portal".to_string(),
+        cfg.network.rpc_portal.clone(),
+    ];
     process::spawn(PROC, &bin, &args, &[])
 }
 
