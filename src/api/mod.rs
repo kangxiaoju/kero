@@ -15,7 +15,7 @@
 //!   POST /sync/devices           -> add device  {id,address,name?}
 //!   GET  /sync/id                -> { deviceID }
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -26,23 +26,52 @@ use crate::sync::syncthing::Syncthing;
 use crate::sync::{FolderSpec, SyncBackend};
 
 pub fn serve(cfg: Config) -> Result<()> {
-    let addr = cfg.daemon.api_addr.clone();
-    let listener = TcpListener::bind(&addr)
-        .with_context(|| format!("binding kero api on {addr}"))?;
-    println!("kero api listening on http://{addr}");
-    for stream in listener.incoming() {
-        match stream {
-            Ok(s) => {
-                let cfg = cfg.clone();
-                // One thread per connection; load is tiny (local management UI).
-                std::thread::spawn(move || {
-                    if let Err(e) = handle(s, &cfg) {
-                        eprintln!("api: {e}");
-                    }
-                });
+    let local_addr = cfg.daemon.api_addr.clone();
+    let mut addrs = vec![local_addr.clone()];
+    // Also listen on the EasyTier virtual IP so mesh peers can reach the
+    // daemon for `kero join` (device discovery + reciprocal registration).
+    let vip = cfg.network.ip.trim();
+    if !vip.is_empty() && !cfg.network.dhcp {
+        if let Some(port) = local_addr.rsplit(':').next() {
+            let vip_addr = format!("{vip}:{port}");
+            if vip_addr != local_addr {
+                addrs.push(vip_addr);
             }
-            Err(e) => eprintln!("api accept: {e}"),
         }
+    }
+
+    let mut handles = Vec::new();
+    for addr in addrs {
+        let listener = match TcpListener::bind(&addr) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("warn: cannot bind kero api on {addr}: {e}");
+                continue;
+            }
+        };
+        println!("kero api listening on http://{addr}");
+        let cfg = cfg.clone();
+        handles.push(std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(s) => {
+                        let cfg = cfg.clone();
+                        std::thread::spawn(move || {
+                            if let Err(e) = handle(s, &cfg) {
+                                eprintln!("api: {e}");
+                            }
+                        });
+                    }
+                    Err(e) => eprintln!("api accept: {e}"),
+                }
+            }
+        }));
+    }
+    if handles.is_empty() {
+        anyhow::bail!("kero api failed to bind any address");
+    }
+    for h in handles {
+        let _ = h.join();
     }
     Ok(())
 }
@@ -258,6 +287,69 @@ fn route(cfg: &Config, req: &Req) -> (u16, Value) {
                 Ok(_) => (200, json!({ "removed": id })),
                 Err(e) => err(500, e.to_string()),
             }
+        }
+
+        // --- kero join (方案 B) -------------------------------------------
+        // Advertise this node's sync identity + shared folders so a joining
+        // peer can mirror them and register reciprocally.
+        ("GET", "/join/info") => {
+            let Some(st) = syncthing(cfg) else {
+                return err(400, "sync disabled on this host");
+            };
+            let Some(sync) = cfg.sync.as_ref() else {
+                return err(400, "sync disabled on this host");
+            };
+            let device_id = match st.device_id() {
+                Ok(id) => id,
+                Err(e) => return err(500, e.to_string()),
+            };
+            let folders = st.list_folders().unwrap_or_default();
+            (200, json!({
+                "deviceId": device_id,
+                "syncPort": sync.sync_port,
+                "ip": cfg.network.ip,
+                "hostname": cfg.network.hostname,
+                "folders": folders.iter().map(|f| json!({
+                    "id": f.id, "label": f.label
+                })).collect::<Vec<_>>(),
+            }))
+        }
+
+        // A joining peer calls this on each existing node to register itself:
+        // the node adds the joiner as a device and shares the given folder.
+        ("POST", "/join/accept") => {
+            let Some(st) = syncthing(cfg) else {
+                return err(400, "sync disabled on this host");
+            };
+            let v: Value = match serde_json::from_slice(&req.body) {
+                Ok(v) => v,
+                Err(e) => return err(400, format!("bad json: {e}")),
+            };
+            let (Some(id), Some(addr)) = (
+                v.get("id").and_then(|x| x.as_str()),
+                v.get("address").and_then(|x| x.as_str()),
+            ) else {
+                return err(400, "missing 'id' or 'address'");
+            };
+            let name = v.get("name").and_then(|x| x.as_str()).unwrap_or(id);
+            if let Err(e) = st.add_device(id, addr, name) {
+                return err(500, e.to_string());
+            }
+            let folders = v
+                .get("folders")
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|d| d.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            for fid in &folders {
+                if let Err(e) = st.share_folder(fid, id) {
+                    eprintln!("join/accept: share {fid} -> {id}: {e}");
+                }
+            }
+            (201, json!({ "accepted": id, "shared": folders }))
         }
 
         _ => err(404, "not found"),

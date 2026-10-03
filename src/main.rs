@@ -36,6 +36,7 @@ fn run() -> Result<()> {
         } => cmd_install(proxy, et_version, st_version, no_sync),
         Command::Init { force } => cmd_init(force),
         Command::Up { no_net } => cmd_up(no_net),
+        Command::Join { dry_run } => cmd_join(dry_run),
         Command::Down => cmd_down(),
         Command::Status => cmd_status(),
         Command::Net { cmd } => cmd_net(cmd),
@@ -146,6 +147,140 @@ fn cmd_up(no_net: bool) -> Result<()> {
         }
     }
     println!("up.");
+    Ok(())
+}
+
+fn cmd_join(dry_run: bool) -> Result<()> {
+    let cfg = load_config()?;
+    let st = require_sync(&cfg)?;
+    let sync = cfg.sync.as_ref().unwrap();
+
+    if !net::is_running() {
+        anyhow::bail!("easytier is not running; run `kero up` first");
+    }
+    if !st.is_running() {
+        anyhow::bail!("syncthing is not running; run `kero up` first");
+    }
+
+    let my_id = st.device_id().context("reading local syncthing id")?;
+    let my_ip = cfg.network.ip.trim().to_string();
+    if my_ip.is_empty() {
+        anyhow::bail!("this host has no static [network].ip; join needs a fixed virtual IP");
+    }
+    let my_addr = format!("tcp://{}:{}", my_ip, sync.sync_port);
+    // All nodes are assumed to expose the kero daemon on the same port.
+    let daemon_port = cfg
+        .daemon
+        .api_addr
+        .rsplit(':')
+        .next()
+        .context("invalid [daemon].api_addr")?
+        .to_string();
+
+    let peers = net::peer_list(&cfg).context("discovering mesh peers")?;
+    let remotes: Vec<_> = peers
+        .iter()
+        .filter(|p| !p.is_local && p.ipv4 != my_ip)
+        .collect();
+    if remotes.is_empty() {
+        println!("no remote peers found in the mesh; nothing to join");
+        return Ok(());
+    }
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+
+    for peer in remotes {
+        let base = format!("http://{}:{}", peer.ipv4, daemon_port);
+        let label = if peer.hostname.is_empty() {
+            &peer.ipv4
+        } else {
+            &peer.hostname
+        };
+        println!("peer {label} ({})", peer.ipv4);
+        let info: serde_json::Value = match client.get(format!("{base}/join/info")).send() {
+            Ok(r) if r.status().is_success() => r.json().unwrap_or_default(),
+            Ok(r) => {
+                eprintln!("  skip: /join/info -> {}", r.status());
+                continue;
+            }
+            Err(e) => {
+                eprintln!("  skip: unreachable ({e})");
+                continue;
+            }
+        };
+        let Some(peer_dev) = info.get("deviceId").and_then(|x| x.as_str()) else {
+            eprintln!("  skip: no deviceId in /join/info");
+            continue;
+        };
+        let peer_port = info
+            .get("syncPort")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(sync.sync_port as u64);
+        let peer_addr = format!("tcp://{}:{}", peer.ipv4, peer_port);
+        let folders = info
+            .get("folders")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if folders.is_empty() {
+            println!("  no shared folders");
+            continue;
+        }
+
+        let mut joined_ids = Vec::new();
+        for f in &folders {
+            let Some(fid) = f.get("id").and_then(|x| x.as_str()) else {
+                continue;
+            };
+            let flabel = f.get("label").and_then(|x| x.as_str()).unwrap_or(fid);
+            let path = std::path::Path::new(&sync.sync_root)
+                .join(flabel)
+                .to_string_lossy()
+                .to_string();
+            if dry_run {
+                println!("  would join folder '{flabel}' ({fid}) -> {path}");
+                joined_ids.push(fid.to_string());
+                continue;
+            }
+            if let Err(e) = st.add_device(peer_dev, &peer_addr, label) {
+                eprintln!("  warn: add_device {peer_dev}: {e}");
+            }
+            std::fs::create_dir_all(&path).ok();
+            let spec = FolderSpec {
+                id: fid.to_string(),
+                label: flabel.to_string(),
+                path: path.clone(),
+                devices: vec![peer_dev.to_string()],
+            };
+            match st.add_folder(&spec) {
+                Ok(_) => {
+                    println!("  joined folder '{flabel}' -> {path}");
+                    joined_ids.push(fid.to_string());
+                }
+                Err(e) => eprintln!("  warn: add_folder {fid}: {e}"),
+            }
+        }
+
+        if dry_run || joined_ids.is_empty() {
+            continue;
+        }
+        // Reciprocal registration: ask the peer to trust us and share back.
+        let body = serde_json::json!({
+            "id": my_id,
+            "address": my_addr,
+            "name": cfg.network.hostname,
+            "folders": joined_ids,
+        });
+        match client.post(format!("{base}/join/accept")).json(&body).send() {
+            Ok(r) if r.status().is_success() => println!("  registered with peer"),
+            Ok(r) => eprintln!("  warn: /join/accept -> {}", r.status()),
+            Err(e) => eprintln!("  warn: /join/accept failed ({e})"),
+        }
+    }
+
+    println!("join complete.");
     Ok(())
 }
 

@@ -42,6 +42,13 @@ pub enum Command {
         #[arg(long)]
         no_net: bool,
     },
+    /// Auto-join an existing mesh's sync folders (discover peers, mirror
+    /// their folders, and register reciprocally).
+    Join {
+        /// Only report what would be joined, without applying changes.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Stop syncthing then easytier.
     Down,
     /// Show combined mesh + sync status.

@@ -69,13 +69,33 @@ kero up                   # 先起 easytier，再起 syncthing
 kero status               # 查看组网节点 + 同步进度
 ```
 
-### 新设备接入已有 mesh
+### 新设备接入已有 mesh（自动加入，推荐）
+
+已有 mesh 内所有节点都在跑 `kero serve` 且使用静态虚拟 IP 时，新机只需：
 
 ```bash
 kero install --proxy http://127.0.0.1:7890
 kero init
-# kero.toml: [network] name/secret 填 mesh 凭据，ip 选未用虚拟 IP，
+# kero.toml: [network] name/secret 填 mesh 凭据，ip 选未用的静态虚拟 IP，
 #            peers 填中继，如 ["tcp://<relay>:11020","udp://<relay>:11020"]
+#            [sync] sync_root 为自动加入的目录落地根（默认 ~/Sync）
+kero up
+kero serve &              # 守护进程，供 mesh 内互相发现
+kero join                 # 自动发现对端、镜像其同步目录、双向登记
+kero status
+```
+
+`kero join` 会：通过 easytier 发现 mesh 内各节点 → 读取对端 `GET /join/info`
+（syncthing id + 共享目录）→ 本机按 `<sync_root>/<label>` 建目录并登记 →
+回调对端 `POST /join/accept` 让其反向信任本机。先用 `kero join --dry-run` 预览。
+
+> 前提：全网节点均跑 `kero serve`、使用静态 `[network].ip`、daemon 端口一致（默认 8391）。
+
+### 新设备接入（手动登记）
+
+若不想用自动加入，可逐台手动登记（Syncthing 需双向信任）：
+
+```bash
 kero up
 kero device id                                    # 取本机 syncthing id
 kero device add <对端id> tcp://<对端虚拟IP>:22000 --name <名称>   # 登记每个对端
@@ -90,6 +110,7 @@ kero status
 kero install [--proxy URL] [--et-version V] [--st-version V] [--no-sync]
 kero init [--force]
 kero up [--no-net]        # --no-net：复用已有 mesh，仅起同步
+kero join [--dry-run]     # 自动加入已有 mesh 的同步目录（双向登记）
 kero down
 kero status
 kero net peers | info
@@ -99,7 +120,7 @@ kero device add <id> <addr> [--name N]
 kero device id
 kero logs [net|sync]
 kero upgrade [--check]
-kero serve                # REST API 守护进程（默认 127.0.0.1:8391）
+kero serve                # REST API 守护进程（默认 127.0.0.1:8391，并监听虚拟 IP）
 kero tui                  # 可选 TUI
 ```
 
@@ -117,6 +138,8 @@ DELETE /sync/folders/<id>
 GET    /sync/devices
 POST   /sync/devices           {id, address, name?}
 GET    /sync/id
+GET    /join/info              本节点 syncthing id + 共享目录（供 join 发现）
+POST   /join/accept           {id, address, name?, folders[]}（对端登记本机）
 ```
 
 ## 构建

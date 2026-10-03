@@ -38,6 +38,8 @@ pub trait SyncBackend {
     fn device_id(&self) -> Result<String>;
     fn add_device(&self, id: &str, addr: &str, name: &str) -> Result<()>;
     fn add_folder(&self, f: &FolderSpec) -> Result<()>;
+    /// Add a device to an existing folder's share list (idempotent).
+    fn share_folder(&self, folder_id: &str, device_id: &str) -> Result<()>;
     fn remove_folder(&self, id: &str) -> Result<()>;
     fn list_folders(&self) -> Result<Vec<FolderStatus>>;
     fn status(&self) -> Result<SyncStatus>;

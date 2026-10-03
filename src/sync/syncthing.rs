@@ -211,6 +211,22 @@ impl SyncBackend for Syncthing {
         self.put(&format!("/rest/config/folders/{}", f.id), &body)
     }
 
+    fn share_folder(&self, folder_id: &str, device_id: &str) -> Result<()> {
+        let mut folder = self.get(&format!("/rest/config/folders/{folder_id}"))?;
+        let devices = folder
+            .get_mut("devices")
+            .and_then(|d| d.as_array_mut())
+            .context("folder config missing devices array")?;
+        let already = devices.iter().any(|d| {
+            d.get("deviceID").and_then(|x| x.as_str()) == Some(device_id)
+        });
+        if already {
+            return Ok(());
+        }
+        devices.push(json!({ "deviceID": device_id }));
+        self.put(&format!("/rest/config/folders/{folder_id}"), &folder)
+    }
+
     fn remove_folder(&self, id: &str) -> Result<()> {
         let resp = self
             .http()?

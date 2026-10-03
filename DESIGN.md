@@ -114,6 +114,7 @@ listeners  = ["tcp://0.0.0.0:11020"]
 listen_ip   = "10.145.145.1"     # BEP 监听绑定到虚拟 IP
 sync_port   = 22010
 api_addr    = "127.0.0.1:8390"   # 仅本地 REST（无面向用户 web）
+sync_root   = "~/Sync"           # `kero join` 自动加入的目录落地根：<sync_root>/<label>
 # kero 自动关闭 global/local discovery、relay、nat
 # [sync] 整段可省略 → easytier-only 主机（配合 `kero install --no-sync`）
 
@@ -142,6 +143,7 @@ kero install [--proxy URL] [--et-version V] [--st-version V] [--no-sync]
                          # --no-sync：仅装 easytier（easytier-only 主机）
 kero init                # 生成默认 kero.toml + syncthing 身份 (generate)
 kero up                  # 启动 easytier→syncthing（先网络后同步）
+kero join [--dry-run]    # 自动加入已有 mesh 的同步目录（发现对端 + 双向登记）
 kero down                # 停止两者
 kero status              # 合并展示：组网节点 + 同步进度
 kero net peers           # easytier 组网节点（转调 easytier-cli）
@@ -152,7 +154,7 @@ kero device add <id> <addr> [--name N]            # 加对端设备 (REST)
 kero device id           # 显示本机 syncthing device id
 kero logs [net|sync]     # 查看日志
 kero upgrade [--check]   # 检查/升级被托管二进制
-kero serve               # 运行 REST API 守护进程（127.0.0.1:8391，主管理接口）
+kero serve               # 运行 REST API 守护进程（127.0.0.1:8391 + 虚拟 IP，主管理接口）
 kero tui                 # 进入 TUI 管理界面（可选）
 ```
 
@@ -169,9 +171,23 @@ DELETE /sync/folders/<id>      删同步目录
 GET    /sync/devices           列对端设备（Syncthing 原始配置）
 POST   /sync/devices           加对端设备 {id, address, name?}
 GET    /sync/id                本机 syncthing device id
+GET    /join/info              本节点 syncthing id + 共享目录（供 join 发现）
+POST   /join/accept           对端据此登记本机并反向共享 {id, address, name?, folders[]}
 ```
 
-easytier-only 主机（无 `[sync]`）上，`/sync/*` 返回 400。
+easytier-only 主机（无 `[sync]`）上，`/sync/*`、`/join/*` 返回 400。
+
+### 自动加入（`kero join`，方案 B）
+
+目标：新机「组网成功 + 起同步」后一条命令接入全网，无需手动两两登记。流程：
+
+1. `easytier-cli -o json peer` 发现 mesh 内所有对端虚拟 IP。
+2. 逐个请求对端 `GET /join/info`，取其 syncthing id、BEP 端口、共享目录列表。
+3. 本机按 `<sync_root>/<label>` 建目录，`add_device` + `add_folder`。
+4. 回调对端 `POST /join/accept`，让其信任本机并把本机加入对应目录（双向信任）。
+
+前提：全网节点均跑 `kero serve`、使用静态 `[network].ip`、daemon 端口一致。
+daemon 因此除 localhost 外还监听虚拟 IP，仅 mesh 内可达。
 
 ## 7. install / upgrade 设计
 

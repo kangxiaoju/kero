@@ -101,3 +101,60 @@ pub fn cli(cfg: &Config, sub: &[&str]) -> Result<String> {
 pub fn peers(cfg: &Config) -> Result<String> {
     cli(cfg, &["peer"])
 }
+
+/// A mesh peer discovered via easytier-cli.
+pub struct MeshPeer {
+    pub ipv4: String,
+    pub hostname: String,
+    pub is_local: bool,
+}
+
+/// Parse `easytier-cli -o json peer` into structured peers, including self
+/// (marked `is_local`). Used by `kero join` to discover the mesh.
+pub fn peer_list(cfg: &Config) -> Result<Vec<MeshPeer>> {
+    let bin = paths::binary("easytier-cli")?;
+    let out = std::process::Command::new(&bin)
+        .arg("-p")
+        .arg(&cfg.network.rpc_portal)
+        .arg("-o")
+        .arg("json")
+        .arg("peer")
+        .output()
+        .context("running easytier-cli -o json peer")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "easytier-cli peer failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).context("parsing easytier-cli json")?;
+    let arr = v.as_array().context("expected a json array of peers")?;
+    let mut peers = Vec::new();
+    for item in arr {
+        let ipv4 = item
+            .get("ipv4")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        if ipv4.is_empty() {
+            continue;
+        }
+        let hostname = item
+            .get("hostname")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let is_local = item
+            .get("cost")
+            .and_then(|x| x.as_str())
+            .map(|c| c.eq_ignore_ascii_case("local"))
+            .unwrap_or(false);
+        peers.push(MeshPeer {
+            ipv4,
+            hostname,
+            is_local,
+        });
+    }
+    Ok(peers)
+}

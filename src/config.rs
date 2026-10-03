@@ -58,6 +58,10 @@ pub struct Sync {
     pub sync_port: u16,
     #[serde(default = "default_api_addr")]
     pub api_addr: String,
+    /// Root directory under which auto-joined folders are created as
+    /// `<sync_root>/<label>`. Used by `kero join`.
+    #[serde(default = "default_sync_root")]
+    pub sync_root: String,
     #[serde(default)]
     pub folder: Vec<Folder>,
     #[serde(default)]
@@ -93,6 +97,11 @@ fn default_listeners() -> Vec<String> {
 }
 fn default_sync_port() -> u16 {
     22010
+}
+fn default_sync_root() -> String {
+    dirs::home_dir()
+        .map(|h| h.join("Sync").to_string_lossy().to_string())
+        .unwrap_or_else(|| "Sync".into())
 }
 fn default_api_addr() -> String {
     "127.0.0.1:8390".into()
@@ -138,6 +147,7 @@ impl Config {
                 listen_ip: "10.145.145.1".into(),
                 sync_port: default_sync_port(),
                 api_addr: default_api_addr(),
+                sync_root: default_sync_root(),
                 folder: vec![],
                 device: vec![],
             }),
